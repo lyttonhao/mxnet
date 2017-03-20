@@ -40,13 +40,13 @@ The committers are the granted write access to the project.
 * [Yuan Tang](https://github.com/terrytangyuan)
   - Yuan is one of major maintainers of mxnet scala package.
 
-### Become a Comitter
-MXNet is a opensource project and we are actively looking for new comitters
-who are willing to help maintaining and lead the project. Committers comes from contributors who:
+### Become a Committer
+MXNet is a opensource project and we are actively looking for new committers
+who are willing to help maintaining and leading the project. Committers come from contributors who:
 * Made substantial contribution to the project.
-* Willing to actively spent time on maintaining and lead the project.
+* Willing to actively spend time on maintaining and leading the project.
 
-New committers will be proposed by current comitter memembers, with support from more than two of current comitters.
+New committers will be proposed by current committers, with support from more than two of current committers.
 
 List of Contributors
 --------------------
@@ -111,3 +111,23 @@ List of Contributors
 * [Jonas Amaro](https://github.com/jonasrla)
 * [Yan Li](https://github.com/Godricly)
 * [Yuance Li](https://github.com/liyuance)
+* [Sandeep Krishnamurthy](https://github.com/sandeep-krishnamurthy)
+* [Andre Moeller](https://github.com/andremoeller)
+* [Miguel Gonzalez-Fierro](https://github.com/miguelgfierro)
+* [Mingjie Xing](https://github.com/EricFisher)
+* [Sebastian Bodenstein](https://github.com/sbodenstein)
+* [Chi Zhang](https://github.com/WellyZhang)
+* [Wei Wu](https://github.com/lazyparser)
+* [Shishi Duan](https://github.com/burness)
+* [Yu Du](https://github.com/Answeror)
+* [Xu Dong](https://github.com/dsqx71)
+* [Chihiro Komaki](https://github.com/ckomaki)
+* [Piyush Singh](https://github.com/Piyush3dB)
+* [Freddy Chua](https://github.com/freddycct)
+* [Jie Zhang](https://github.com/luoyetx)
+* [Leonard Lausen](https://github.com/leezu)
+* [Sergey Kolychev](https://github.com/sergeykolychev)
+  - Sergey is original author and current maintainer of Perl5 interface.
+* [Robert Stone](https://github.com/tlby)
+* [Pedro Larroy](https://github.com/larroy)
+* [Jun Wu](https://github.com/reminisce)

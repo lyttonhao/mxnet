@@ -30,12 +30,15 @@ enum SequenceMaskOpOutputs { kOut };
 
 struct SequenceMaskParam : public dmlc::Parameter<SequenceMaskParam> {
   bool use_sequence_length;
+  float value;
   DMLC_DECLARE_PARAMETER(SequenceMaskParam) {
     DMLC_DECLARE_FIELD(use_sequence_length)
         .set_default(false)
         .describe(
             "If set to true, this layer takes in extra input sequence_length "
             "to specify variable length sequence");
+    DMLC_DECLARE_FIELD(value).set_default(0.).describe(
+        "The value to be used as a mask.");
   }
 };
 
@@ -50,8 +53,8 @@ class SequenceMaskOp : public Operator {
                        const std::vector<TBlob> &aux_args) {
     using namespace mshadow;
     using namespace mshadow::expr;
-    CHECK_EQ(in_data.size(), param_.use_sequence_length ? 2 : 1);
-    CHECK_EQ(out_data.size(), 1);
+    CHECK_EQ(in_data.size(), param_.use_sequence_length ? 2U : 1U);
+    CHECK_EQ(out_data.size(), 1U);
     Stream<xpu> *s = ctx.get_stream<xpu>();
 
     // Get any size input + output into required form
@@ -66,11 +69,10 @@ class SequenceMaskOp : public Operator {
     Tensor<xpu, 3, DType> out =
         out_data[seq_mask::kOut].get_with_shape<xpu, 3, DType>(s3, s);
     Assign(out, req[seq_mask::kOut], F<mshadow_op::identity>(data));
-
     if (param_.use_sequence_length) {
       Tensor<xpu, 1, DType> indices =
           in_data[seq_mask::kSequenceLength].get<xpu, 1, DType>(s);
-      SequenceMask(out, indices);
+      SequenceMask(out, indices, static_cast<DType>(param_.value));
     }
   }
 
@@ -83,8 +85,8 @@ class SequenceMaskOp : public Operator {
                         const std::vector<TBlob> &aux_args) {
     using namespace mshadow;
     using namespace mshadow::expr;
-    CHECK_EQ(out_grad.size(), 1);
-    CHECK_EQ(in_data.size(), param_.use_sequence_length ? 2 : 1);
+    CHECK_EQ(out_grad.size(), 1U);
+    CHECK_EQ(in_data.size(), param_.use_sequence_length ? 2U : 1U);
     Stream<xpu> *s = ctx.get_stream<xpu>();
 
     // Get any size input + output into required form
@@ -106,7 +108,7 @@ class SequenceMaskOp : public Operator {
     if (param_.use_sequence_length) {
       Tensor<xpu, 1, DType> indices =
           in_data[seq_mask::kSequenceLength].get<xpu, 1, DType>(s);
-      SequenceMask(data_grad, indices);
+      SequenceMask(data_grad, indices, DType(0));
     }
   }
 
@@ -145,11 +147,12 @@ class SequenceMaskProp : public OperatorProperty {
   bool InferShape(std::vector<TShape> *in_shape, std::vector<TShape> *out_shape,
                   std::vector<TShape> *aux_shape) const override {
     using namespace mshadow;
-    CHECK_EQ(in_shape->size(), param_.use_sequence_length ? 2 : 1)
+    CHECK_EQ(in_shape->size(), param_.use_sequence_length ? 2U : 1U)
         << "Input:[data, sequence_length]";
 
     const TShape &dshape = (*in_shape)[seq_mask::kData];
-    if (dshape.ndim() == 0) return false;
+    CHECK_GT(dshape.ndim(), 2U)
+        << "The data array must be of rank 3 or greater.";
     // seq length vector is same as batch size
     if (param_.use_sequence_length)
       SHAPE_ASSIGN_CHECK(*in_shape, seq_mask::kSequenceLength,
@@ -163,7 +166,7 @@ class SequenceMaskProp : public OperatorProperty {
 
   bool InferType(std::vector<int> *in_type, std::vector<int> *out_type,
                  std::vector<int> *aux_type) const override {
-    CHECK_GE(in_type->size(), param_.use_sequence_length ? 2 : 1);
+    CHECK_GE(in_type->size(), param_.use_sequence_length ? 2U : 1U);
     int dtype = (*in_type)[0];
     CHECK_NE(dtype, -1) << "First input must have specified type";
     for (index_t i = 0; i < in_type->size(); ++i) {

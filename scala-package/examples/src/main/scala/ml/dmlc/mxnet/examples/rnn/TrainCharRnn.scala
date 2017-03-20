@@ -1,3 +1,20 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package ml.dmlc.mxnet.examples.rnn
 
 import ml.dmlc.mxnet._
@@ -27,7 +44,7 @@ object TrainCharRnn {
       // We can support various length input
       // For this problem, we cut each input sentence to length of 129
       // So we only need fix length bucket
-      val buckets = List(129)
+      val buckets = Array(129)
       // hidden unit in LSTM cell
       val numHidden = 512
       // embedding dimension, which is, map a char to a 256 dim vector
@@ -57,7 +74,7 @@ object TrainCharRnn {
       val initH = for (l <- 0 until numLstmLayer) yield (s"l${l}_init_h", (batchSize, numHidden))
       val initStates = initC ++ initH
 
-      val dataTrain = new ButketIo.BucketSentenceIter(incr.dataPath, vocab, buckets,
+      val dataTrain = new BucketIo.BucketSentenceIter(incr.dataPath, vocab, buckets,
                                           batchSize, initStates, seperateChar = "\n",
                                           text2Id = Utils.text2Id, readContent = Utils.readContent)
 

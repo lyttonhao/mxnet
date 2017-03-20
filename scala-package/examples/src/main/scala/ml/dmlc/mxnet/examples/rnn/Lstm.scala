@@ -1,7 +1,26 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+
 package ml.dmlc.mxnet.examples.rnn
 
 import ml.dmlc.mxnet.Symbol
-import ml.dmlc.mxnet.Executor
+
+import scala.collection.mutable.ArrayBuffer
 
 /**
  * @author Depeng Liang
@@ -51,27 +70,29 @@ object Lstm {
     val clsWeight = Symbol.Variable("cls_weight")
     val clsBias = Symbol.Variable("cls_bias")
 
-    var paramCells = Array[LSTMParam]()
-    var lastStates = Array[LSTMState]()
+    val paramCellsBuf = ArrayBuffer[LSTMParam]()
+    val lastStatesBuf = ArrayBuffer[LSTMState]()
     for (i <- 0 until numLstmLayer) {
-      paramCells = paramCells :+ LSTMParam(i2hWeight = Symbol.Variable(s"l${i}_i2h_weight"),
-                                           i2hBias = Symbol.Variable(s"l${i}_i2h_bias"),
-                                           h2hWeight = Symbol.Variable(s"l${i}_h2h_weight"),
-                                           h2hBias = Symbol.Variable(s"l${i}_h2h_bias"))
-      lastStates = lastStates :+ LSTMState(c = Symbol.Variable(s"l${i}_init_c"),
-                                           h = Symbol.Variable(s"l${i}_init_h"))
+      paramCellsBuf.append(LSTMParam(i2hWeight = Symbol.Variable(s"l${i}_i2h_weight"),
+                                     i2hBias = Symbol.Variable(s"l${i}_i2h_bias"),
+                                     h2hWeight = Symbol.Variable(s"l${i}_h2h_weight"),
+                                     h2hBias = Symbol.Variable(s"l${i}_h2h_bias")))
+      lastStatesBuf.append(LSTMState(c = Symbol.Variable(s"l${i}_init_c"),
+                                     h = Symbol.Variable(s"l${i}_init_h")))
     }
-    assert(lastStates.length == numLstmLayer)
+    val paramCells = paramCellsBuf.toArray
+    val lastStates = lastStatesBuf.toArray
+    require(lastStates.length == numLstmLayer)
 
     // embeding layer
     val data = Symbol.Variable("data")
     var label = Symbol.Variable("softmax_label")
     val embed = Symbol.Embedding("embed")()(Map("data" -> data, "input_dim" -> inputSize,
                                            "weight" -> embedWeight, "output_dim" -> numEmbed))
-    val wordvec = Symbol.SliceChannel()(embed)(
-      Map("num_outputs" -> seqLen, "squeeze_axis" -> true))
+    val wordvec = Symbol.SliceChannel()()(
+      Map("data" -> embed, "num_outputs" -> seqLen, "squeeze_axis" -> 1))
 
-    var hiddenAll = Array[Symbol]()
+    val hiddenAll = ArrayBuffer[Symbol]()
     var dpRatio = 0f
     var hidden: Symbol = null
     for (seqIdx <- 0 until seqLen) {
@@ -88,7 +109,7 @@ object Lstm {
       }
       // decoder
       if (dropout > 0f) hidden = Symbol.Dropout()()(Map("data" -> hidden, "p" -> dropout))
-      hiddenAll = hiddenAll :+ hidden
+      hiddenAll.append(hidden)
     }
     val hiddenConcat = Symbol.Concat()(hiddenAll: _*)(Map("dim" -> 0))
     val pred = Symbol.FullyConnected("pred")()(Map("data" -> hiddenConcat, "num_hidden" -> numLabel,

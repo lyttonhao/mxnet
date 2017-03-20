@@ -1,12 +1,68 @@
 # coding: utf-8
 """Tools for testing."""
-# pylint: disable=invalid-name, no-member, too-many-arguments, too-many-locals, too-many-branches, too-many-statements, broad-except, line-too-long
+# pylint: disable=invalid-name, no-member, too-many-arguments, too-many-locals, too-many-branches, too-many-statements, broad-except, line-too-long, unused-import
 from __future__ import absolute_import, print_function, division
 import time
+import traceback
+import numbers
+import subprocess
+import os
+import errno
+import logging
 import numpy as np
 import numpy.testing as npt
 import mxnet as mx
+from .context import cpu, gpu, Context
+from .ndarray import array
+from .symbol import Symbol
+try:
+    import requests
+except ImportError:
+    # in rare cases requests may be not installed
+    pass
+
 _rng = np.random.RandomState(1234)
+
+
+def default_context():
+    """Get default context for regression test."""
+    # _TODO: get context from environment variable to support
+    # testing with GPUs
+    return Context.default_ctx
+
+
+def set_default_context(ctx):
+    """Set default ctx"""
+    Context.default_ctx = ctx
+
+
+def default_dtype():
+    """Get default data type for regression test."""
+    # _TODO: get default dtype from environment variable
+    return np.float32
+
+
+def get_atol(atol=None):
+    """Get default numerical threshold for regression test."""
+    # _TODO: get from env variable, different threshold might
+    # be needed for different device and dtype
+    return 1e-20 if atol is None else atol
+
+
+def get_rtol(rtol=None):
+    """Get default numerical threshold for regression test."""
+    # _TODO: get from env variable, different threshold might
+    # be needed for different device and dtype
+    return 1e-5 if rtol is None else rtol
+
+
+def random_arrays(*shapes):
+    """Generate some random numpy arrays."""
+    arrays = [np.random.randn(*s).astype(default_dtype())
+              for s in shapes]
+    if len(arrays) == 1:
+        return arrays[0]
+    return arrays
 
 
 def np_reduce(dat, axis, keepdims, numpy_reduce_func):
@@ -41,6 +97,18 @@ def np_reduce(dat, axis, keepdims, numpy_reduce_func):
     return ret
 
 
+def find_max_violation(a, b, rtol=None, atol=None):
+    """find location of maximum violation"""
+    rtol = get_rtol(rtol)
+    atol = get_atol(atol)
+    diff = np.abs(a-b)
+    tol = atol + rtol*np.abs(b)
+    violation = diff/(tol+1e-20)
+    loc = np.argmax(violation)
+    idx = np.unravel_index(loc, violation.shape)
+    return idx, np.max(violation)
+
+
 def same(a, b):
     """Test if two numpy arrays are the same
 
@@ -52,22 +120,132 @@ def same(a, b):
     return np.array_equal(a, b)
 
 
-def reldiff(a, b):
-    """Calculate the relative difference between two input arrays
+def almost_equal(a, b, rtol=None, atol=None):
+    """Test if two numpy arrays are almost equal."""
+    return np.allclose(a, b, rtol=get_rtol(rtol), atol=get_atol(atol))
 
-    Calculated by :math:`\\frac{|a-b|^2}{|a|^2 + |b|^2}`
+
+def assert_almost_equal(a, b, rtol=None, atol=None, names=('a', 'b')):
+    """Test that two numpy arrays are almost equal. Raise exception message if not.
 
     Parameters
     ----------
     a : np.ndarray
     b : np.ndarray
+    threshold : None or float
+        The checking threshold. Default threshold will be used if set to None
     """
-    diff = np.sum(np.abs(a - b))
-    norm = np.sum(np.abs(a)) + np.sum(np.abs(b))
-    if diff == 0:
-        return 0
-    ret = diff / norm
-    return ret
+    rtol = get_rtol(rtol)
+    atol = get_atol(atol)
+
+    if almost_equal(a, b, rtol, atol):
+        return
+
+    index, rel = find_max_violation(a, b, rtol, atol)
+    np.set_printoptions(threshold=4, suppress=True)
+    msg = npt.build_err_msg([a, b],
+                            err_msg="Error %f exceeds tolerance rtol=%f, atol=%f. "
+                                    " Location of maximum error:%s, a=%f, b=%f"
+                            % (rel, rtol, atol, str(index), a[index], b[index]),
+                            names=names)
+    raise AssertionError(msg)
+
+
+def almost_equal_ignore_nan(a, b, rtol=None, atol=None):
+    """Test that two numpy arrays are almost equal (ignoring NaN in either array).
+    Combines a relative and absolute measure of approximate eqality.
+    If either the relative or absolute check passes, the arrays are considered equal.
+    Including an absolute check resolves issues with the relative check where all
+    array values are close to zero.
+
+    Parameters
+    ----------
+    a : np.ndarray
+    b : np.ndarray
+    rtol : None or float
+        The relative threshold. Default threshold will be used if set to None
+    atol : None or float
+        The absolute threshold. Default threshold will be used if set to None
+    """
+    a = np.copy(a)
+    b = np.copy(b)
+    nan_mask = np.logical_or(np.isnan(a), np.isnan(b))
+    a[nan_mask] = 0
+    b[nan_mask] = 0
+
+    return almost_equal(a, b, rtol, atol)
+
+def assert_almost_equal_ignore_nan(a, b, rtol=None, atol=None, names=('a', 'b')):
+    """Test that two numpy arrays are almost equal (ignoring NaN in either array).
+    Combines a relative and absolute measure of approximate eqality.
+    If either the relative or absolute check passes, the arrays are considered equal.
+    Including an absolute check resolves issues with the relative check where all
+    array values are close to zero.
+
+    Parameters
+    ----------
+    a : np.ndarray
+    b : np.ndarray
+    rtol : None or float
+        The relative threshold. Default threshold will be used if set to None
+    atol : None or float
+        The absolute threshold. Default threshold will be used if set to None
+    """
+    a = np.copy(a)
+    b = np.copy(b)
+    nan_mask = np.logical_or(np.isnan(a), np.isnan(b))
+    a[nan_mask] = 0
+    b[nan_mask] = 0
+
+    assert_almost_equal(a, b, rtol, atol, names)
+
+
+def retry(n):
+    """Retry n times before failing for stochastic test cases"""
+    assert n > 0
+    def decorate(f):
+        """Decorate a test case"""
+        def wrapper(*args, **kwargs):
+            """Wrapper for tests function"""
+            for _ in range(n):
+                try:
+                    f(*args, **kwargs)
+                except AssertionError as e:
+                    err = e
+                    continue
+                return
+            raise err
+        return wrapper
+    return decorate
+
+
+def simple_forward(sym, ctx=None, is_train=False, **inputs):
+    """A simple forward function for a symbol.
+
+    Primarily used in doctest to conveniently test the function
+    of a symbol. Takes numpy array as inputs and outputs are
+    also converted to numpy arrays.
+
+    Parameters
+    ----------
+    ctx : Context
+        If None, will take the default context.
+    inputs : keyword arguments
+        Mapping each input name to a numpy array.
+
+    Returns
+    -------
+    The result as a numpy array. Multiple results will
+    be returned as a list of numpy arrays.
+    """
+    ctx = ctx or default_context()
+    inputs = {k: array(v) for k, v in inputs.iteritems()}
+    exe = sym.bind(ctx, args=inputs)
+    exe.forward(is_train=is_train)
+    outputs = [x.asnumpy() for x in exe.outputs]
+    if len(outputs) == 1:
+        outputs = outputs[0]
+    return outputs
 
 
 def _parse_location(sym, location, ctx):
@@ -133,44 +311,53 @@ def numeric_grad(executor, location, aux_states=None, eps=1e-4, use_forward_trai
         Argument values used as location to compute gradient
         Maps the name of arguments to the corresponding numpy.ndarray.
         Value of all the arguments must be provided.
-    aux_states : None or list of numpy.ndarray or dict of str to numpy.ndarray
+    aux_states : None or list of numpy.ndarray or dict of str to numpy.ndarray, optional
         Auxiliary states values used as location to compute gradient
         Maps the name of aux_states to the corresponding numpy.ndarray.
         Value of all the auxiliary arguments must be provided.
     eps : float, optional
         epsilon for the finite-difference method
-
+    use_forward_train : bool, optional
+        Whether to use `is_train=True` in testing.
     References
     ---------
     ..[1] https://github.com/Theano/Theano/blob/master/theano/gradient.py
     """
+    approx_grads = {k: np.zeros(v.shape, dtype=np.float32)
+                    for k, v in location.items()}
     for k, v in location.items():
         executor.arg_dict[k][:] = v
-    approx_grads = {k:np.zeros(v.shape, dtype=np.float32) for k, v in location.items()}
-
-    executor.forward(is_train=use_forward_train)
-    f_x = executor.outputs[0].asnumpy()[0]
+    for k in location:
+        location[k] = np.ascontiguousarray(location[k])
     for k, v in location.items():
         old_value = v.copy()
         for i in range(np.prod(v.shape)):
             # inplace update
-            v.reshape((np.prod(v.shape), 1))[i] += eps
-            # set initial states. Need to set all due to inplace operations
-            for key, val in location.items():
-                executor.arg_dict[key][:] = val
+            v.ravel()[i] += eps/2.0
+            executor.arg_dict[k][:] = v
             if aux_states is not None:
                 for key, val in aux_states.items():
                     executor.aux_dict[key][:] = val
             executor.forward(is_train=use_forward_train)
-            f_eps = executor.outputs[0].asnumpy()[0]
-            approx_grads[k].ravel()[i] = (f_eps - f_x) / eps
-            v.reshape((np.prod(v.shape), 1))[i] = old_value.reshape((np.prod(v.shape), 1))[i]
+            f_peps = executor.outputs[0].asnumpy()
 
+            v.ravel()[i] -= eps
+            executor.arg_dict[k][:] = v
+            if aux_states is not None:
+                for key, val in aux_states.items():
+                    executor.aux_dict[key][:] = val
+            executor.forward(is_train=use_forward_train)
+            f_neps = executor.outputs[0].asnumpy()
+
+            approx_grads[k].ravel()[i] = (f_peps - f_neps).sum() / eps
+            v.ravel()[i] = old_value.ravel()[i]
+        # copy back the original value
+        executor.arg_dict[k][:] = old_value
     return approx_grads
 
 
-def check_numeric_gradient(sym, location, aux_states=None, numeric_eps=1e-4, check_eps=1e-2,
-                           grad_nodes=None, use_forward_train=True, ctx=mx.cpu()):
+def check_numeric_gradient(sym, location, aux_states=None, numeric_eps=1e-3, rtol=1e-2,
+                           atol=None, grad_nodes=None, use_forward_train=True, ctx=None):
     """Verify an operation by checking backward pass via finite difference method.
 
     Based on Theano's `theano.gradient.verify_grad` [1]
@@ -203,6 +390,8 @@ def check_numeric_gradient(sym, location, aux_states=None, numeric_eps=1e-4, che
     ---------
     ..[1] https://github.com/Theano/Theano/blob/master/theano/gradient.py
     """
+    if ctx is None:
+        ctx = default_context()
 
     def random_projection(shape):
         """Get a random weight matrix with not too small elements
@@ -215,6 +404,7 @@ def check_numeric_gradient(sym, location, aux_states=None, numeric_eps=1e-4, che
         # otherwise too much precision is lost in numerical gradient
         plain = _rng.rand(*shape) + 0.1
         return plain
+
     location = _parse_location(sym=sym, location=location, ctx=ctx)
     location_npy = {k:v.asnumpy() for k, v in location.items()}
     aux_states = _parse_aux_states(sym=sym, aux_states=aux_states, ctx=ctx)
@@ -237,7 +427,7 @@ def check_numeric_gradient(sym, location, aux_states=None, numeric_eps=1e-4, che
     input_shape = {k: v.shape for k, v in location.items()}
     _, out_shape, _ = sym.infer_shape(**input_shape)
     proj = mx.sym.Variable("__random_proj")
-    out = mx.sym.sum(sym * proj)
+    out = sym * proj
     out = mx.sym.MakeLoss(out)
 
     location = dict(list(location.items()) +
@@ -267,28 +457,20 @@ def check_numeric_gradient(sym, location, aux_states=None, numeric_eps=1e-4, che
         orig_grad = args_grad_npy[name]
         sym_grad = symbolic_grads[name]
         if grad_req[name] == 'write':
-            rel = reldiff(fd_grad, sym_grad)
-            arr_l = [fd_grad, sym_grad]
+            assert_almost_equal(fd_grad, sym_grad, rtol, atol,
+                                ("NUMERICAL_%s"%name, "BACKWARD_%s"%name))
         elif grad_req[name] == 'add':
-            rel = reldiff(fd_grad, sym_grad - orig_grad)
-            arr_l = [fd_grad, sym_grad - orig_grad]
+            assert_almost_equal(fd_grad, sym_grad - orig_grad, rtol, atol,
+                                ("NUMERICAL_%s"%name, "BACKWARD_%s"%name))
         elif grad_req[name] == 'null':
-            rel = reldiff(orig_grad, sym_grad)
-            arr_l = [orig_grad, sym_grad]
+            assert_almost_equal(orig_grad, sym_grad, rtol, atol,
+                                ("NUMERICAL_%s"%name, "BACKWARD_%s"%name))
         else:
-            raise ValueError
-        if np.isnan(rel) or rel > check_eps:
-            np.set_printoptions(threshold=4, suppress=True)
-            msg = npt.build_err_msg(arr_l,
-                                    err_msg="In symbol \"%s\", ctx=%s, "
-                                            "numeric check failed for \"%s\", grad_req= \"%s\". "
-                                            "Rel Err=%f, Expected <=%f"
-                                    %(sym.name, str(ctx), name, grad_req[name], rel, check_eps),
-                                    names=["NUMERICAL", "BACKWARD"])
-            raise Exception(msg)
+            raise ValueError("Invalid grad_req %s for argument %s"%(grad_req[name], name))
 
 
-def check_symbolic_forward(sym, location, expected, check_eps=1E-4, aux_states=None, ctx=mx.cpu()):
+def check_symbolic_forward(sym, location, expected, rtol=1E-4, atol=None,
+                           aux_states=None, ctx=None):
     """Compare foward call to expected value.
 
     Parameters
@@ -319,6 +501,9 @@ def check_symbolic_forward(sym, location, expected, check_eps=1E-4, aux_states=N
     ctx : Context, optional
         running context
     """
+    if ctx is None:
+        ctx = default_context()
+
     location = _parse_location(sym=sym, location=location, ctx=ctx)
     aux_states = _parse_aux_states(sym=sym, aux_states=aux_states, ctx=ctx)
     if isinstance(expected, dict):
@@ -334,20 +519,12 @@ def check_symbolic_forward(sym, location, expected, check_eps=1E-4, aux_states=N
     outputs = [x.asnumpy() for x in executor.outputs]
 
     for output_name, expect, output in zip(sym.list_outputs(), expected, outputs):
-        rel = reldiff(expect, output)
-        if rel > check_eps:
-            np.set_printoptions(threshold=4, suppress=True)
-            msg = npt.build_err_msg([expect, output],
-                                    err_msg="In symbol \"%s\", ctx=%s, "
-                                            "forward check failed for \"%s\". "
-                                            "Rel Err=%f, Expected <=%f"
-                                    %(sym.name, str(ctx), output_name, rel, check_eps),
-                                    names=["EXPECTED", "FORWARD"])
-            raise Exception(msg)
+        assert_almost_equal(expect, output, rtol, atol,
+                            ("EXPECTED_%s"%output_name, "FORWARD_%s"%output_name))
 
 
-def check_symbolic_backward(sym, location, out_grads, expected, check_eps=1e-5,
-                            aux_states=None, grad_req='write', ctx=mx.cpu()):
+def check_symbolic_backward(sym, location, out_grads, expected, rtol=1e-5, atol=None,
+                            aux_states=None, grad_req='write', ctx=None):
     """Compare backward call to expected value.
 
     Parameters
@@ -383,6 +560,9 @@ def check_symbolic_backward(sym, location, out_grads, expected, check_eps=1e-5,
     ctx : Context, optional
         running context
     """
+    if ctx is None:
+        ctx = default_context()
+
     location = _parse_location(sym=sym, location=location, ctx=ctx)
     aux_states = _parse_aux_states(sym=sym, aux_states=aux_states, ctx=ctx)
     if isinstance(expected, (list, tuple)):
@@ -407,28 +587,19 @@ def check_symbolic_backward(sym, location, out_grads, expected, check_eps=1e-5,
     grads = {k: v.asnumpy() for k, v in args_grad_data.items()}
     for name in expected:
         if grad_req[name] == 'write':
-            rel = reldiff(expected[name], grads[name])
-            arr_l = [expected[name], grads[name]]
+            assert_almost_equal(expected[name], grads[name], rtol, atol,
+                                ("EXPECTED_%s"%name, "BACKWARD_%s"%name))
         elif grad_req[name] == 'add':
-            rel = reldiff(expected[name], grads[name] - args_grad_npy[name])
-            arr_l = [expected[name], grads[name] - args_grad_npy[name]]
+            assert_almost_equal(expected[name], grads[name] - args_grad_npy[name],
+                                rtol, atol, ("EXPECTED_%s"%name, "BACKWARD_%s"%name))
         elif grad_req[name] == 'null':
-            rel = reldiff(args_grad_npy[name], grads[name])
-            arr_l = [args_grad_npy[name], grads[name]]
+            assert_almost_equal(args_grad_npy[name], grads[name],
+                                rtol, atol, ("EXPECTED_%s"%name, "BACKWARD_%s"%name))
         else:
-            raise ValueError
-        if rel > check_eps:
-            np.set_printoptions(threshold=4, suppress=True)
-            msg = npt.build_err_msg(arr_l,
-                                    err_msg="In symbol \"%s\", ctx=%s, "
-                                            "backward check failed for \"%s\". "
-                                            "Rel Err=%f, Expected <=%f"
-                                    %(sym.name, str(ctx), name, rel, check_eps),
-                                    names=["EXPECTED", "BACKWARD"])
-            raise Exception(msg)
+            raise ValueError("Invalid grad_req %s for argument %s"%(grad_req[name], name))
 
 
-def check_speed(sym, location=None, ctx=mx.cpu(), N=20, grad_req=None, typ="whole",
+def check_speed(sym, location=None, ctx=None, N=20, grad_req=None, typ="whole",
                 **kwargs):
     """Check the running speed of a symbol
 
@@ -452,6 +623,9 @@ def check_speed(sym, location=None, ctx=mx.cpu(), N=20, grad_req=None, typ="whol
         - "forward"
             only test the forward speed
     """
+    if ctx is None:
+        ctx = default_context()
+
     if grad_req is None:
         grad_req = 'write'
     if location is None:
@@ -477,8 +651,6 @@ def check_speed(sym, location=None, ctx=mx.cpu(), N=20, grad_req=None, typ="whol
         for _ in range(N):
             exe.forward(is_train=True)
             exe.backward(out_grads=exe.outputs)
-            for output in exe.outputs:
-                output.wait_to_read()
         mx.nd.waitall()
         toc = time.time()
         forward_backward_time = (toc - tic) * 1.0 / N
@@ -493,8 +665,6 @@ def check_speed(sym, location=None, ctx=mx.cpu(), N=20, grad_req=None, typ="whol
         tic = time.time()
         for _ in range(N):
             exe.forward(is_train=False)
-            for output in exe.outputs:
-                output.wait_to_read()
         mx.nd.waitall()
         toc = time.time()
         forward_time = (toc - tic) * 1.0 / N
@@ -503,19 +673,22 @@ def check_speed(sym, location=None, ctx=mx.cpu(), N=20, grad_req=None, typ="whol
         raise ValueError('typ can only be "whole" or "forward".')
 
 
-def check_consistency(sym, ctx_list, scale=1.0, grad_req='write'):
+def check_consistency(sym, ctx_list, scale=1.0, grad_req='write',
+                      arg_params=None, aux_params=None, tol=None,
+                      raise_on_err=True, ground_truth=None):
     """Check symbol gives the same output for different running context
 
     Parameters
     ----------
-    sym : Symbol
-        symbol to run the consistency test
+    sym : Symbol or list of Symbols
+        symbol(s) to run the consistency test
     ctx_list : list
         running context. See example for more detail.
     scale : float, optional
         standard deviation of the inner normal distribution. Used in initialization
     grad_req : str or list of str or dict of str to str
         gradient requirement.
+
     Examples
     --------
     >>> # create the symbol
@@ -542,61 +715,169 @@ def check_consistency(sym, ctx_list, scale=1.0, grad_req='write'):
   'type_dict': {'concat_arg0': np.float32, 'concat_arg1': np.float32}}]
     >>> check_consistency(sym, ctx_list)
     """
-    tol = {np.dtype(np.float16): 1e-1,
-           np.dtype(np.float32): 1e-3,
-           np.dtype(np.float64): 1e-5,
-           np.dtype(np.uint8): 0,
-           np.dtype(np.int32): 0}
+    if tol is None:
+        tol = {np.dtype(np.float16): 1e-1,
+               np.dtype(np.float32): 1e-3,
+               np.dtype(np.float64): 1e-5,
+               np.dtype(np.uint8): 0,
+               np.dtype(np.int32): 0}
+    elif isinstance(tol, numbers.Number):
+        tol = {np.dtype(np.float16): tol,
+               np.dtype(np.float32): tol,
+               np.dtype(np.float64): tol,
+               np.dtype(np.uint8): tol,
+               np.dtype(np.int32): tol}
+
     assert len(ctx_list) > 1
-    exe_list = [sym.simple_bind(grad_req=grad_req, **ctx) for ctx in ctx_list]
+    if isinstance(sym, Symbol):
+        sym = [sym]*len(ctx_list)
+    else:
+        assert len(sym) == len(ctx_list)
+
+    output_names = sym[0].list_outputs()
+    arg_names = sym[0].list_arguments()
+    exe_list = []
+    for s, ctx in zip(sym, ctx_list):
+        assert s.list_arguments() == arg_names
+        assert s.list_outputs() == output_names
+        exe_list.append(s.simple_bind(grad_req=grad_req, **ctx))
+
+    arg_params = {} if arg_params is None else arg_params
+    aux_params = {} if aux_params is None else aux_params
+    for n, arr in exe_list[0].arg_dict.items():
+        if n not in arg_params:
+            arg_params[n] = np.random.normal(size=arr.shape, scale=scale)
+    for n, arr in exe_list[0].aux_dict.items():
+        if n not in aux_params:
+            aux_params[n] = 0
     for exe in exe_list:
-        assert len(exe.outputs) == 1
-        assert len(exe.arg_arrays) == len(exe_list[0].arg_arrays)
-        assert len(exe.grad_arrays) == len(exe_list[0].grad_arrays)
+        for name, arr in exe.arg_dict.items():
+            arr[:] = arg_params[name]
+        for name, arr in exe.aux_dict.items():
+            arr[:] = aux_params[name]
 
-    init = [np.random.normal(size=arr.shape, scale=scale) for arr in exe_list[0].arg_arrays]
-    if sym.name == 'embedding':
-        init[0] = np.random.randint(low=0, high=10, size=exe_list[0].arg_arrays[0].shape)
-
-    for exe in exe_list:
-        for arr, iarr in zip(exe.arg_arrays, init):
-            arr[:] = iarr.astype(arr.dtype)
-
-    # forward
-    for exe in exe_list:
-        exe.forward(is_train=True)
-        exe.backward(exe.outputs[0])
-
-    outputs = [exe.outputs[0].asnumpy() for exe in exe_list]
-    # lazy solution handling None grad
-    grads = [[grad.asnumpy() if grad is not None else np.zeros(1) for grad in exe.grad_arrays] for exe in exe_list]
-    dtypes = [arr.dtype for arr in outputs]
+    dtypes = [np.dtype(exe.outputs[0].dtype) for exe in exe_list]
     max_idx = np.argmax(dtypes)
+    gt = ground_truth
+    if gt is None:
+        gt = exe_list[max_idx].output_dict.copy()
+        if grad_req != 'null':
+            gt.update(exe_list[max_idx].grad_dict)
 
-    for i, exe in enumerate(exe_list):
-        if i == max_idx:
-            continue
-        for arr1, arr2 in zip([outputs[i]]+grads[i], [outputs[max_idx]]+grads[max_idx]):
-            arr2 = arr2.astype(dtypes[i])
-            try:
-                npt.assert_allclose(arr1, arr2, rtol=tol[dtypes[i]], atol=tol[dtypes[i]])
-            except Exception as e:
-                print(e)
-
-    #forward predict
+    # test
     for exe in exe_list:
         exe.forward(is_train=False)
 
-    outputs = [exe.outputs[0].asnumpy() for exe in exe_list]
-    dtypes = [arr.dtype for arr in outputs]
-    max_idx = np.argmax(dtypes)
-
     for i, exe in enumerate(exe_list):
         if i == max_idx:
             continue
-        for arr1, arr2 in zip([outputs[i]], [outputs[max_idx]]):
-            arr2 = arr2.astype(dtypes[i])
+        for name, arr in zip(output_names, exe.outputs):
+            gtarr = gt[name].astype(dtypes[i]).asnumpy()
+            arr = arr.asnumpy()
             try:
-                npt.assert_allclose(arr1, arr2, rtol=tol[dtypes[i]], atol=tol[dtypes[i]])
+                assert_almost_equal(arr, gtarr, rtol=tol[dtypes[i]], atol=tol[dtypes[i]])
             except Exception as e:
-                print(e)
+                print('Predict Err: ctx %d vs ctx %d at %s'%(i, max_idx, name))
+                traceback.print_exc()
+                if raise_on_err:
+                    raise e
+                else:
+                    print(str(e))
+
+    # train
+    if grad_req != 'null':
+        for exe in exe_list:
+            exe.forward(is_train=True)
+            exe.backward(exe.outputs)
+
+        for i, exe in enumerate(exe_list):
+            if i == max_idx:
+                continue
+            curr = zip(output_names + arg_names, exe.outputs + exe.grad_arrays)
+            for name, arr in curr:
+                if gt[name] is None:
+                    assert arr is None
+                    continue
+                gtarr = gt[name].astype(dtypes[i]).asnumpy()
+                arr = arr.asnumpy()
+                try:
+                    assert_almost_equal(arr, gtarr, rtol=tol[dtypes[i]], atol=tol[dtypes[i]])
+                except Exception as e:
+                    print('Train Err: ctx %d vs ctx %d at %s'%(i, max_idx, name))
+                    traceback.print_exc()
+                    if raise_on_err:
+                        raise e
+                    else:
+                        print(str(e))
+
+    return gt
+
+def list_gpus():
+    """Return a list of GPUs
+
+    Returns
+    -------
+    list of int:
+        If there are n GPUs, then return a list [0,1,...,n-1]. Otherwise returns
+        [].
+    """
+    re = ''
+    nvidia_smi = ['nvidia-smi', '/usr/bin/nvidia-smi', '/usr/local/nvidia/bin/nvidia-smi']
+    for cmd in nvidia_smi:
+        try:
+            re = subprocess.check_output([cmd, "-L"], universal_newlines=True)
+        except OSError:
+            pass
+    return range(len([i for i in re.split('\n') if 'GPU' in i]))
+
+def download(url, fname=None, dirname=None, overwrite=False):
+    """Download an given URL
+
+    Parameters
+    ----------
+
+    url : str
+        URL to download
+    fname : str, optional
+        filename of the downloaded file. If None, then will guess a filename
+        from url.
+    dirname : str, optional
+        output directory name. If None, then guess from fname or use the current
+        directory
+    overwrite : bool, optional
+        Default is false, which means skipping download if the local file
+        exists. If true, then download the url to overwrite the local file if
+        exists.
+
+    Returns
+    -------
+    str
+        The filename of the downloaded file
+    """
+    if fname is None:
+        fname = url.split('/')[-1]
+    if not overwrite and os.path.exists(fname):
+        logging.info("%s exists, skip to downloada", fname)
+        return fname
+
+    if dirname is None:
+        dirname = os.path.dirname(fname)
+    else:
+        fname = os.path.join(dirname, fname)
+    if dirname != "":
+        if not os.path.exists(dirname):
+            try:
+                logging.info('create directory %s', dirname)
+                os.makedirs(dirname)
+            except OSError as exc:
+                if exc.errno != errno.EEXIST:
+                    raise OSError('failed to create ' + dirname)
+
+    r = requests.get(url, stream=True)
+    assert r.status_code == 200, "failed to open %s" % url
+    with open(fname, 'wb') as f:
+        for chunk in r.iter_content(chunk_size=1024):
+            if chunk: # filter out keep-alive new chunks
+                f.write(chunk)
+    logging.info("downloaded %s into %s successfully", url, fname)
+    return fname
