@@ -1,11 +1,11 @@
 /*!
  * Copyright (c) 2015 by Contributors
- * \file fm_convolution2-inl.h
+ * \file fm_convolution3-inl.h
  * \brief factorized bilinear layer (speed up version by batch_dot)
- * \author Yanghao Li
+ * \author Yanhao Li
 */
-#ifndef MXNET_OPERATOR_FM_CONVOLUTION2_INL_H_
-#define MXNET_OPERATOR_FM_CONVOLUTION2_INL_H_
+#ifndef MXNET_OPERATOR_FM_CONVOLUTION3_INL_H_
+#define MXNET_OPERATOR_FM_CONVOLUTION3_INL_H_
 
 #include <dmlc/logging.h>
 #include <dmlc/parameter.h>
@@ -24,13 +24,13 @@ namespace mxnet {
 namespace op {
 
 namespace fmconv {
-enum FMConvolution2OpInputs {kData, kWeight, kBias};
-enum FMConvolution2OpOutputs {kOut, kMask};
-enum FMConvolution2OpResource {kTempSpace, kRandom};
+enum FMConvolution3OpInputs {kData, kWeight, kBias};
+enum FMConvolution3OpOutputs {kOut, kMask};
+enum FMConvolution3OpResource {kTempSpace, kRandom};
 //enum FMConvolution2OpForwardResource {kRandom};
 }
 
-struct FMConvolution2Param : public dmlc::Parameter<FMConvolution2Param> {
+struct FMConvolution3Param : public dmlc::Parameter<FMConvolution3Param> {
   TShape kernel;
   TShape stride;
   TShape dilate;
@@ -42,7 +42,7 @@ struct FMConvolution2Param : public dmlc::Parameter<FMConvolution2Param> {
   bool no_bias;
   float eps;
   float p;
-  DMLC_DECLARE_PARAMETER(FMConvolution2Param) {
+  DMLC_DECLARE_PARAMETER(FMConvolution3Param) {
     int shape[] = {1, 1};
     DMLC_DECLARE_FIELD(kernel).describe("convolution kernel size: (y, x)");
     DMLC_DECLARE_FIELD(stride).set_default(TShape(shape, shape + 2))
@@ -72,9 +72,9 @@ struct FMConvolution2Param : public dmlc::Parameter<FMConvolution2Param> {
 };
 
 template<typename xpu>
-class FMConvolution2Op : public Operator {
+class FMConvolution3Op : public Operator {
  public:
-  explicit FMConvolution2Op(FMConvolution2Param param) {
+  explicit FMConvolution3Op(FMConvolution3Param param) {
     this->param_ = param;
     this->pkeep_ = 1.0f - param.p;
     // convert MBytes first to Bytes and then to elements.
@@ -123,8 +123,8 @@ class FMConvolution2Op : public Operator {
     
     Tensor<xpu, 1> workspace = ctx.requested[fmconv::kTempSpace].get_space<xpu>(
         Shape1((required_size 
-                + output_size * (2 * wmat_shape[2] * wmat_shape[3]
-                                 + 3 * gstride * _ssize
+                + output_size * (1 * wmat_shape[2] * wmat_shape[3]
+                                 + 1 * gstride * _ssize
                                  + param_.num_factor * _ssize
                                  + 2 * gstride
                                  + _ssize)
@@ -133,8 +133,6 @@ class FMConvolution2Op : public Operator {
     dptr = workspace.dptr_;
     Tensor<xpu, 3> mask_w = Tensor<xpu, 3>(dptr, Shape3(output_size, wmat_shape[2], wmat_shape[3]), s);
     dptr += mask_w.shape_.Size();
-    Tensor<xpu, 3> mask_w_T = Tensor<xpu, 3>(dptr, Shape3(output_size, wmat_shape[3], wmat_shape[2]), s);
-    dptr += mask_w_T.shape_.Size();
     Tensor<xpu, 2> mask1 = Tensor<xpu, 2>(dptr, Shape2(wmat_shape[2], wmat_shape[3]), s);
     dptr += mask1.shape_.Size();
     _dptr = dptr;
@@ -160,15 +158,10 @@ class FMConvolution2Op : public Operator {
       dptr += col.shape_.Size();
       Tensor<xpu, 2> col1 = Tensor<xpu, 2>(dptr, Shape2(output_size, gstride), s);
       dptr += col1.shape_.Size();
-      Tensor<xpu, 3> group_data2 = Tensor<xpu, 3>(dptr, Shape3(output_size, gstride, ssize), s);
-      dptr += group_data2.shape_.Size();
       Tensor<xpu, 3> temp2 = Tensor<xpu, 3>(dptr, Shape3(output_size, 1, gstride), s);
       dptr += temp2.shape_.Size();
       Tensor<xpu, 3> temp3 = Tensor<xpu, 3>(dptr, Shape3(output_size, 1, ssize), s);
       dptr += temp3.shape_.Size();
-      Tensor<xpu, 3> group_data = Tensor<xpu, 3>(dptr, Shape3(output_size, gstride, ssize), s);
-      dptr += group_data.shape_.Size();
-
 
       if (param_.pad[0] == 0 && param_.pad[1] == 0) {
         temp_col = unpack_patch2col(data.Slice(i, i + step),
@@ -195,12 +188,10 @@ class FMConvolution2Op : public Operator {
 
         for (int j = 0;j < output_size;++j) {
           mask_w[j] = mask1 * wmat[gid][j];
-          mask_w_T[j] = mask_w[j].T() * 1.0f;
-          group_data[j] = tmpc * 1.0f;
-          group_data2[j] = tmpc * tmpc;
+          temp[j] = tmpc * 1.0f;
         }
-        BatchGEMM<false, false>(temp1, mask_w, group_data, 1.0f, 0.0f, bgemm_space);
-        BatchGEMM<false, false>(temp, mask_w_T, temp1, 1.0f, 0.0f, bgemm_space);
+        BatchGEMM<false, false>(temp1, mask_w, temp, 1.0f, 0.0f, bgemm_space);
+        BatchGEMM<true, false>(temp, mask_w, temp1, 1.0f, 0.0f, bgemm_space);
 
         for (int j = 0; j < output_size; ++j) {
           temp[j] = temp[j] * tmpc;
@@ -209,8 +200,9 @@ class FMConvolution2Op : public Operator {
 
           col1[j] = sum_rows(mask_w[j] * mask_w[j]);
           temp2[j] = reshape(col1[j], Shape2(1, gstride));
+          temp[j] = tmpc * tmpc;
         }
-        BatchGEMM<false, false>(temp3, temp2, group_data2, 1.0f, 0.0f, bgemm_space);
+        BatchGEMM<false, false>(temp3, temp2, temp, 1.0f, 0.0f, bgemm_space);
 
         for (int j = 0;j < output_size;++j){
           temp_dst[gid].Slice(j, j+1) -= temp3[j];
@@ -272,10 +264,10 @@ class FMConvolution2Op : public Operator {
 
     Tensor<xpu, 1> workspace = ctx.requested[fmconv::kTempSpace].get_space<xpu>(
               Shape1((required_size 
-                      + output_size * (3 * wmat_shape[2] * wmat_shape[3]
-                                       + 4 * gstride * _ssize
+                      + output_size * (2 * wmat_shape[2] * wmat_shape[3]
+                                       + 1 * gstride * _ssize
                                        + param_.num_factor * _ssize
-                                       + 2 * gstride
+                                       + 1 * gstride
                                        + _ssize)
                       + wmat_shape[2] * wmat_shape[3])
                       + gstride 
@@ -283,8 +275,6 @@ class FMConvolution2Op : public Operator {
     dptr = workspace.dptr_;
     Tensor<xpu, 3> mask_w = Tensor<xpu, 3>(dptr, Shape3(output_size, wmat_shape[2], wmat_shape[3]), s);
     dptr += mask_w.shape_.Size();
-    Tensor<xpu, 3> mask_w_T = Tensor<xpu, 3>(dptr, Shape3(output_size, wmat_shape[3], wmat_shape[2]), s);
-    dptr += mask_w_T.shape_.Size();
     Tensor<xpu, 2> mask1 = Tensor<xpu, 2>(dptr, Shape2(wmat_shape[2], wmat_shape[3]), s);
     dptr += mask1.shape_.Size();
     _dptr = dptr;
@@ -306,24 +296,16 @@ class FMConvolution2Op : public Operator {
       dptr += temp_dst.shape_.Size();
       Tensor<xpu, 3> temp = Tensor<xpu, 3>(dptr, Shape3(output_size, gstride, ssize), s);
       dptr += temp.shape_.Size();
-      Tensor<xpu, 3> temp_T = Tensor<xpu, 3>(dptr, Shape3(output_size, ssize, gstride), s);
-      dptr += temp_T.shape_.Size();
       Tensor<xpu, 3> temp1 = Tensor<xpu, 3>(dptr, Shape3(output_size, param_.num_factor, ssize), s);
       dptr += temp1.shape_.Size();
       Tensor<xpu, 1> col1 = Tensor<xpu, 1>(dptr, Shape1(gstride), gstride, s);
       dptr += col1.shape_.Size();
-      Tensor<xpu, 3> data2_T = Tensor<xpu, 3>(dptr, Shape3(output_size, ssize, gstride), s);
-      dptr += data2_T.shape_.Size();
       Tensor<xpu, 3> temp2 = Tensor<xpu, 3>(dptr, Shape3(output_size, 1, gstride), s);
       dptr += temp2.shape_.Size();
-      Tensor<xpu, 3> temp2_T = Tensor<xpu, 3>(dptr, Shape3(output_size, gstride, 1), s);
-      dptr += temp2_T.shape_.Size();
       Tensor<xpu, 3> temp3 = Tensor<xpu, 3>(dptr, Shape3(output_size, 1, ssize), s);
       dptr += temp3.shape_.Size();
       Tensor<xpu, 3> temp_w = Tensor<xpu, 3>(dptr, Shape3(output_size, wmat_shape[2], wmat_shape[3]), s);
       dptr += temp_w.shape_.Size();
-      Tensor<xpu, 3> group_data = Tensor<xpu, 3>(dptr, Shape3(output_size, gstride, ssize), s);
-      dptr += group_data.shape_.Size();
       Tensor<xpu, 2> temp_col1 = Tensor<xpu, 2>(dptr, Shape2(shape_colunit_[0], ssize), s);
       dptr += temp_col1.shape_.Size();
 
@@ -351,22 +333,22 @@ class FMConvolution2Op : public Operator {
 
         for (uint32_t j = 0;j < output_size;++j) {
           mask_w[j] = mask1 * wmat[gid][j];
-          mask_w_T[j] = mask_w[j].T();
-          group_data[j] = tmpc * 1.0f;
-          data2_T[j] = tmpc.T() * tmpc.T();
-
-          temp[j] = repmat(temp_dst[gid][j], gstride);
-          temp_T[j] = tmpc.T() * temp[j].T();
+          temp[j] = tmpc * 1.0f;
         }
-        BatchGEMM<false, false>(temp1, mask_w, group_data, 1.0f, 0.0f, bgemm_space);
-        BatchGEMM<false, false>(temp_w, temp1, temp_T, 1.0f, 0.0f, bgemm_space);
+        BatchGEMM<false, false>(temp1, mask_w, temp, 1.0f, 0.0f, bgemm_space);
+        for (uint32_t j = 0;j < output_size;++j) {
+          temp[j] = repmat(temp_dst[gid][j], gstride);
+          temp[j] = temp[j] * tmpc;
+        }
+        BatchGEMM<false, true>(temp_w, temp1, temp, 1.0f, 0.0f, bgemm_space);
 
         for (uint32_t j = 0;j < output_size;++j) {
           gwmat[gid][j] += 2 * mask1 * temp_w[j];
 
           temp3[j] = reshape(temp_dst[gid][j], Shape2(1, ssize));
+          temp[j] = tmpc * tmpc;
         }
-        BatchGEMM<false, false>(temp2, temp3, data2_T, 1.0f, 0.0f, bgemm_space);
+        BatchGEMM<false, true>(temp2, temp3, temp, 1.0f, 0.0f, bgemm_space);
 
         for (uint32_t j = 0;j < output_size;++j) {
           col1 = reshape(temp2[j], Shape1(gstride));
@@ -379,17 +361,16 @@ class FMConvolution2Op : public Operator {
         if (req[fmconv::kData] == kWriteTo || req[fmconv::kData] == kWriteInplace) {
           Tensor<xpu, 2> gtmpc = temp_col1.Slice(gstride * gid, gstride * (gid + 1));
 
-          BatchGEMM<false, false>(temp, mask_w_T, temp1, 2.0f, 0.0f, bgemm_space);
+          BatchGEMM<true, false>(temp, mask_w, temp1, 2.0f, 0.0f, bgemm_space);
           for (uint32_t j = 0;j < output_size;++j) {
             temp[j] *= repmat(temp_dst[gid][j], gstride);
             gtmpc += temp[j];
 
             col1 = sum_rows(mask_w[j] * mask_w[j]);
             temp2[j] = reshape(col1, Shape2(1, gstride));
-            temp2_T[j] = temp2[j].T();
             temp3[j] = reshape(temp_dst[gid][j], Shape2(1, ssize));
           }
-          BatchGEMM<false, false>(temp, temp2_T, temp3, 2.0f, 0.0f, bgemm_space);
+          BatchGEMM<true, false>(temp, temp2, temp3, 2.0f, 0.0f, bgemm_space);
           for (uint32_t j = 0;j < output_size;++j)
             gtmpc -= temp[j];
 
@@ -453,7 +434,7 @@ class FMConvolution2Op : public Operator {
     return required_size;
   }
 
-  FMConvolution2Param param_;
+  FMConvolution3Param param_;
   mshadow::Shape<2> shape_colunit_;
   mshadow::Shape<3> shape_dstunit_;
   index_t nstep_;
@@ -461,10 +442,10 @@ class FMConvolution2Op : public Operator {
 };  // class FMConvolutionOp
 
 template<typename xpu>
-Operator* CreateOp(FMConvolution2Param param);
+Operator* CreateOp(FMConvolution3Param param);
 
 #if DMLC_USE_CXX11
-class FMConvolution2Prop : public OperatorProperty {
+class FMConvolution3Prop : public OperatorProperty {
  public:
   std::vector<std::string> ListArguments() const override {
     if (!param_.no_bias) {
@@ -540,13 +521,13 @@ class FMConvolution2Prop : public OperatorProperty {
   }
 
   OperatorProperty* Copy() const override {
-    auto ptr = new FMConvolution2Prop();
+    auto ptr = new FMConvolution3Prop();
     ptr->param_ = param_;
     return ptr;
   }
 
   std::string TypeString() const override {
-    return "FMConvolution2";
+    return "FMConvolution3";
   }
 
   std::vector<int> DeclareBackwardDependency(
@@ -572,9 +553,9 @@ class FMConvolution2Prop : public OperatorProperty {
   Operator* CreateOperator(Context ctx) const override;
 
  private:
-  FMConvolution2Param param_;
+  FMConvolution3Param param_;
 };  // class FMConvolutionProp
 #endif  // DMLC_USE_CXX11
 }  // namespace op
 }  // namespace mxnet
-#endif  // MXNET_OPERATOR_FM_CONVOLUTION2_INL_H_
+#endif  // MXNET_OPERATOR_FM_CONVOLUTION3_INL_H_
