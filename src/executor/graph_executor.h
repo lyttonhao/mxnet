@@ -20,6 +20,20 @@
 #include "./exec_pass.h"
 
 namespace mxnet {
+
+using NodeOperatorMap = std::unordered_map<const nnvm::Node*,
+    std::shared_ptr<Operator>>;
+
+// forward declaration
+namespace exec {
+class GraphExecutor;
+}
+
+// forward declaration
+namespace autograd {
+class AutogradRuntime;
+}
+
 namespace exec {
 
 using nnvm::Graph;
@@ -27,6 +41,7 @@ using nnvm::Graph;
 // graph executors
 class GraphExecutor : public Executor {
  public:
+  friend class autograd::AutogradRuntime;
   using Executor::MonitorCallback;
 
   virtual ~GraphExecutor();
@@ -44,7 +59,9 @@ class GraphExecutor : public Executor {
             const std::vector<NDArray>& arg_grad_store,
             const std::vector<OpReqType>& grad_req_type,
             const std::vector<NDArray>& aux_states,
-            Executor* shared_exec = nullptr);
+            Executor* shared_exec = nullptr,
+            const nnvm::NodeEntryMap<NDArray>& feed_dict
+              = nnvm::NodeEntryMap<NDArray>());
 
  protected:
   // Information about operational node
@@ -85,7 +102,9 @@ class GraphExecutor : public Executor {
                   const std::vector<NDArray>& in_args,
                   const std::vector<NDArray>& arg_grad_store,
                   const std::vector<OpReqType>& grad_req_type,
-                  const std::vector<NDArray>& aux_states);
+                  const std::vector<NDArray>& aux_states,
+                  const nnvm::NodeEntryMap<NDArray>& feed_dict
+                    = nnvm::NodeEntryMap<NDArray>());
   // initialize the full graph, including gradient.
   Graph InitFullGraph(nnvm::Symbol symbol,
                       const std::vector<OpReqType>& grad_req_type,
@@ -108,6 +127,8 @@ class GraphExecutor : public Executor {
    *  ret.opr Can be nullptr if creation failed.
   */
   CachedSegOpr CreateCachedSegOpr(size_t topo_start, size_t topo_end);
+  // run the monitor callback for node `nid`
+  void ExecuteMonCallback(size_t nid);
 
   // internal graph
   nnvm::Graph graph_;
@@ -133,6 +154,8 @@ class GraphExecutor : public Executor {
   size_t num_forward_inputs_{0};
   // number of forward nodes
   size_t num_forward_nodes_{0};
+  // saved operator for autograd
+  NodeOperatorMap saved_opr_;
   // monitor call back
   std::function<void(const char*, void*)> monitor_callback_{nullptr};
   // whether to enable bulk execution

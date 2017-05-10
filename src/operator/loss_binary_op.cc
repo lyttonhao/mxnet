@@ -9,7 +9,23 @@ namespace mxnet {
 namespace op {
 
 NNVM_REGISTER_OP(softmax_cross_entropy)
-.MXNET_DESCRIBE("Calculate cross_entropy(data, one_hot(label))")
+.describe(R"code(Calculate cross entropy of softmax output and one-hot label.
+
+- This operator computes the cross entropy in two steps:
+  - Applies softmax function on the input array.
+  - Computes and returns the cross entropy loss between the softmax output and the labels.
+
+- The softmax function and cross entropy loss is given by:
+
+  - Softmax Function:
+
+  .. math:: \text{softmax}(x)_i = \frac{exp(x_i)}{\sum_j exp(x_j)}
+
+  - Cross Entropy Function:
+
+  .. math:: \text{CE(label, output)} = - \sum_i \text{label}_i \log(\text{output}_i)
+
+)code" ADD_FILELINE)
 .set_num_inputs(2)
 .set_num_outputs(1)
 .set_attr<nnvm::FInferShape>("FInferShape", SoftmaxCrossEntropyShape)
@@ -20,8 +36,8 @@ NNVM_REGISTER_OP(softmax_cross_entropy)
   })
 .set_attr<FCompute>("FCompute<cpu>", SoftmaxCrossEntropyForward<cpu>)
 .set_attr<nnvm::FGradient>("FGradient", ElemwiseGradUseIn{"_backward_softmax_cross_entropy"})
-.add_argument("data", "NDArray", "Input data")
-.add_argument("label", "NDArray", "Input label");
+.add_argument("data", "NDArray-or-Symbol", "Input data")
+.add_argument("label", "NDArray-or-Symbol", "Input label");
 
 NNVM_REGISTER_OP(_backward_softmax_cross_entropy)
 .set_num_inputs(3)

@@ -14,13 +14,15 @@
 #include <nnvm/node.h>
 #include <nnvm/op_attr_types.h>
 #include <vector>
+#include <string>
 #include <utility>
 #include "./operator_common.h"
 
 namespace mxnet {
 namespace op {
 template<typename AttrType, bool (*is_none)(const AttrType&),
-         bool (*assign)(AttrType*, const AttrType&), bool reverse_infer>
+         bool (*assign)(AttrType*, const AttrType&), bool reverse_infer,
+         std::string (*attr_string)(const AttrType&)>
 inline bool ElemwiseAttr(const nnvm::NodeAttrs& attrs,
                          std::vector<AttrType> *in_attrs,
                          std::vector<AttrType> *out_attrs,
@@ -30,7 +32,8 @@ inline bool ElemwiseAttr(const nnvm::NodeAttrs& attrs,
       for (size_t i = 0; i < vec->size(); ++i) {
         CHECK(assign(&dattr, (*vec)[i]))
           << "Incompatible attr in node " << attrs.name << " at " << i << "-th "
-          << name << ": " << "expected " << dattr << ", got " << (*vec)[i];
+          << name << ": " << "expected " << attr_string(dattr)
+          << ", got " << attr_string((*vec)[i]);
       }
     };
   deduce(in_attrs, "input");
@@ -40,7 +43,8 @@ inline bool ElemwiseAttr(const nnvm::NodeAttrs& attrs,
       for (size_t i = 0; i < vec->size(); ++i) {
         CHECK(assign(&(*vec)[i], dattr))
           << "Incompatible attr in node " << attrs.name << " at " << i << "-th "
-          << name << ": " << "expected " << dattr << ", got " << (*vec)[i];
+          << name << ": " << "expected " << attr_string(dattr)
+          << ", got " << attr_string((*vec)[i]);
       }
     };
   write(in_attrs, "input");
@@ -55,7 +59,7 @@ inline bool ElemwiseShape(const nnvm::NodeAttrs& attrs,
                           std::vector<TShape> *out_attrs) {
   CHECK_EQ(in_attrs->size(), static_cast<size_t>(n_in)) << " in operator " << attrs.name;
   CHECK_EQ(out_attrs->size(), static_cast<size_t>(n_out)) << " in operator " << attrs.name;
-  return ElemwiseAttr<TShape, shape_is_none, shape_assign, true>(
+  return ElemwiseAttr<TShape, shape_is_none, shape_assign, true, shape_string>(
     attrs, in_attrs, out_attrs, TShape());
 }
 
@@ -65,7 +69,7 @@ inline bool ElemwiseType(const nnvm::NodeAttrs& attrs,
                          std::vector<int> *out_attrs) {
   CHECK_EQ(in_attrs->size(), static_cast<size_t>(n_in)) << " in operator " << attrs.name;
   CHECK_EQ(out_attrs->size(), static_cast<size_t>(n_out)) << " in operator " << attrs.name;
-  return ElemwiseAttr<int, type_is_none, type_assign, true>(
+  return ElemwiseAttr<int, type_is_none, type_assign, true, type_string>(
     attrs, in_attrs, out_attrs, -1);
 }
 
@@ -74,11 +78,7 @@ struct ElemwiseGradUseIn {
   const char *op_name;
   std::vector<nnvm::NodeEntry> operator()(const nnvm::NodePtr& n,
                                           const std::vector<nnvm::NodeEntry>& ograds) {
-    std::vector<nnvm::NodeEntry> heads(ograds.begin(), ograds.end());
-    for (auto& h : n->inputs) {
-      heads.push_back(h);
-    }
-    return MakeGradNode(op_name, n, heads, n->attrs.dict);
+    return MakeNonlossGradNode(op_name, n, ograds, n->inputs, n->attrs.dict);
   }
 };
 
@@ -87,12 +87,12 @@ struct ElemwiseGradUseOut {
   const char *op_name;
   std::vector<nnvm::NodeEntry> operator()(const nnvm::NodePtr& n,
                                           const std::vector<nnvm::NodeEntry>& ograds) {
-    std::vector<nnvm::NodeEntry> heads(ograds.begin(), ograds.end());
+    std::vector<nnvm::NodeEntry> heads;
     index_t n_out = n->num_outputs();
     for (index_t i = 0; i < n_out; ++i) {
       heads.emplace_back(nnvm::NodeEntry{n, i, 0});
     }
-    return MakeGradNode(op_name, n, heads, n->attrs.dict);
+    return MakeNonlossGradNode(op_name, n, ograds, heads, n->attrs.dict);
   }
 };
 
@@ -101,7 +101,7 @@ struct ElemwiseGradUseNone {
   const char *op_name;
   std::vector<nnvm::NodeEntry> operator()(const nnvm::NodePtr& n,
                                           const std::vector<nnvm::NodeEntry>& ograds) {
-    return MakeGradNode(op_name, n, ograds, n->attrs.dict);
+    return MakeNonlossGradNode(op_name, n, ograds, {}, n->attrs.dict);
   }
 };
 

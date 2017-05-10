@@ -64,7 +64,7 @@ struct OpContext {
 
 /*!
  * \brief Operator interface.
- *  Operator defins basic operation unit of optimized computation graph in mxnet.
+ *  Operator defines basic operation unit of optimized computation graph in mxnet.
  *  This interface relies on pre-allocated memory in TBlob, the caller need to set
  *  the memory region in TBlob correctly before calling Forward and Backward.
  *
@@ -538,7 +538,7 @@ struct OperatorPropertyReg
 #define MXNET_REGISTER_OP_PROPERTY(name, OperatorPropertyType)          \
   DMLC_REGISTRY_REGISTER(::mxnet::OperatorPropertyReg, OperatorPropertyReg, name) \
   .set_body([]() { return new OperatorPropertyType(); })                \
-  .set_return_type("Symbol") \
+  .set_return_type("NDArray-or-Symbol") \
   .check_name()
 
 #endif  // DMLC_USE_CXX11

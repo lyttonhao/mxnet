@@ -84,10 +84,9 @@ static void KVStoreServer_callback(int head, const char *body, void* callback)
 {
     {
         dSP;
-        STRLEN len;
         PUSHMARK(SP);
         XPUSHs(sv_2mortal(newSViv(head)));
-        XPUSHs(sv_2mortal(newSVpv(body, len)));
+        XPUSHs(sv_2mortal(newSVpv(body, 0)));
         PUTBACK;
         call_sv((SV*)callback, G_DISCARD);
     }
@@ -97,9 +96,8 @@ static void ExecutorMonitor_callback(const char* name, NDArrayHandle handle, voi
 {
     {
         dSP;
-        STRLEN len;
         PUSHMARK(SP);
-        XPUSHs(sv_2mortal(newSVpv(name, len)));
+        XPUSHs(sv_2mortal(newSVpv(name, 0)));
         XPUSHs(SWIG_NewPointerObj(SWIG_as_voidptr(handle), SWIGTYPE_p_MXNDArray, 0));
         PUTBACK;
         call_sv((SV*)callback, G_DISCARD);
@@ -187,44 +185,6 @@ struct NDArrayOpInfo {
   void* p_declare_backward_dependency;
 };
 
-struct CustomOpInfo {
-  bool (*forward)(int /*size*/, void** /*ptrs*/, int* /*tags*/,
-                  const int* /*reqs*/, const bool /*is_train*/, void* /*state*/);
-  bool (*backward)(int /*size*/, void** /*ptrs*/, int* /*tags*/,
-                   const int* /*reqs*/, const bool /*is_train*/, void* /*state*/);
-  bool (*del)(void* /*state*/);
-  // all functions also pass a payload void* pointer
-  void* p_forward;
-  void* p_backward;
-  void* p_del;
-};
-
-struct CustomOpPropInfo {
-  bool (*list_arguments)(char*** /*args*/, void* /*state*/);
-  bool (*list_outputs)(char*** /*outputs*/, void* /*state*/);
-  bool (*infer_shape)(int /*num_input*/, int* /*ndims*/, unsigned** /*shapes*/,
-                      void* /*state*/);
-  bool (*declare_backward_dependency)(const int* /*out_grad*/, const int* /*in_data*/,
-                                      const int* /*out_data*/, int* /*num_deps*/,
-                                      int** /*rdeps*/, void* /*state*/);
-  bool (*create_operator)(const char* /*ctx*/, int /*num_inputs*/, unsigned** /*shapes*/,
-                          int* /*ndims*/, int* /*dtypes*/,
-                          CustomOpInfo* /*ret*/, void* /*state*/);
-  bool (*list_auxiliary_states)(char*** /*aux*/, void* /*state*/);
-  bool (*del)(void* /*state*/);
-  // all functions also pass a payload void* pointer
-  void* p_list_arguments;
-  void* p_list_outputs;
-  void* p_infer_shape;
-  void* p_declare_backward_dependency;
-  void* p_create_operator;
-  void* p_list_auxiliary_states;
-  void* p_del;
-};
-
-typedef bool (*CustomOpPropCreator)(const char* /*op_type*/, const int /*num_kwargs*/,
-                                    const char** /*keys*/, const char** /*values*/,
-                                    CustomOpPropInfo* /*ret*/);
 /*!
  * \brief return str message of the last error
  *  all function in this file will return 0 when success
@@ -473,7 +433,7 @@ int MXNDArrayGetShape(NDArrayHandle handle,
  * \return 0 when success, -1 when failure happens
  */
 int MXNDArrayGetData(NDArrayHandle handle,
-                               mx_float **out_pdata);
+                                void **out_pdata);
 /*!
  * \brief get the type of the data in NDArray
  * \param handle the handle to the narray

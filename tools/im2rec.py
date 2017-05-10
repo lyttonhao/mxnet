@@ -83,7 +83,15 @@ def read_list(path_in):
             if not line:
                 break
             line = [i.strip() for i in line.strip().split('\t')]
-            item = [int(line[0])] + [line[-1]] + [float(i) for i in line[1:-1]]
+            line_len = len(line)
+            if line_len < 3:
+                print('lst should at least has three parts, but only has %s parts for %s' %(line_len, line))
+                continue
+            try:
+                item = [int(line[0])] + [line[-1]] + [float(i) for i in line[1:-1]]
+            except Exception, e:
+                print('Parsing lst met error for %s, detail: %s' %(line, e))
+                continue
             yield item
 
 def image_encode(args, i, item, q_out):
@@ -190,7 +198,7 @@ def parse_args():
                         help='If this is set im2rec will create image list(s) by traversing root folder\
         and output to <prefix>.lst.\
         Otherwise im2rec will read <prefix>.lst and create a database at <prefix>.rec')
-    cgroup.add_argument('--exts', type=list, default=['.jpeg', '.jpg'],
+    cgroup.add_argument('--exts', nargs='+', default=['.jpeg', '.jpg'],
                         help='list of acceptable image extensions.')
     cgroup.add_argument('--chunks', type=int, default=1, help='number of chunks.')
     cgroup.add_argument('--train-ratio', type=float, default=1.0,

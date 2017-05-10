@@ -3,10 +3,18 @@
 ```eval_rst
 .. currentmodule:: mxnet.ndarray
 ```
+
 ## Overview
 
-This document lists the routines of the `ndarray` (or `nd` for short) package
-grouped by functionality.
+This document lists the routines of the *n*-dimensional array package
+
+```eval_rst
+.. autosummary::
+    :nosignatures:
+
+    mxnet.ndarray
+```
+
 A `NDArray` is a multidimensional container of items of the same type and
 size. Various methods for data manipulation and computation are provided.
 
@@ -235,6 +243,7 @@ In the rest of this document, we first overview the methods provided by the
     take
     batch_take
     one_hot
+    pick
 ```
 
 ## Mathematical functions
@@ -360,8 +369,13 @@ In the rest of this document, we first overview the methods provided by the
 .. autosummary::
     :nosignatures:
 
-    uniform
-    normal
+    random_uniform
+    random_normal
+    random_gamma
+    random_exponential
+    random_poisson
+    random_negative_binomial
+    random_generalized_negative_binomial
     mxnet.random.seed
 ```
 
@@ -407,6 +421,8 @@ In the rest of this document, we first overview the methods provided by the
     BatchNorm
     Pooling
     SoftmaxOutput
+    softmax
+    log_softmax
 ```
 
 ### More

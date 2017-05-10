@@ -21,10 +21,10 @@ import org.slf4j.{Logger, LoggerFactory}
 
 /**
  * Callback functions that can be used to track various status during epoch.
- * @author Yizhi Liu
  */
 object Callback {
-  class Speedometer(val batchSize: Int, val frequent: Int = 50) extends BatchEndCallback {
+
+  class Speedometer(batchSize: Int, frequent: Int = 50) extends BatchEndCallback {
     private val logger: Logger = LoggerFactory.getLogger(classOf[Speedometer])
     private var init = false
     private var tic: Long = 0L
@@ -41,8 +41,10 @@ object Callback {
           val speed = frequent.toDouble * batchSize / (System.currentTimeMillis - tic) * 1000
           if (evalMetric != null) {
             val (name, value) = evalMetric.get
-            logger.info("Epoch[%d] Batch [%d]\tSpeed: %.2f samples/sec\tTrain-%s=%f".format(
-              epoch, count, speed, name, value))
+            name.zip(value).foreach { case (n, v) =>
+              logger.info("Epoch[%d] Batch [%d]\tSpeed: %.2f samples/sec\tTrain-%s=%f".format(
+              epoch, count, speed, n, v))
+            }
           } else {
             logger.info("Iter[%d] Batch [%d]\tSpeed: %.2f samples/sec".format(epoch, count, speed))
           }

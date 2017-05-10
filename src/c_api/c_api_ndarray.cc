@@ -11,10 +11,13 @@
 #include <mxnet/op_attr_types.h>
 #include <nnvm/node.h>
 #include <nnvm/op_attr_types.h>
+#include <string>
 #include "./c_api_common.h"
 #include "../common/utils.h"
+#include "../ndarray/autograd.h"
 
 using namespace mxnet;
+using mxnet::autograd::AutogradRuntime;
 
 void SetOpAttrs(const nnvm::Op *op,
                 nnvm::NodeAttrs *p_attrs,
@@ -224,7 +227,7 @@ void SetDependency(std::vector<engine::VarHandle> *p_read_vars,
       write_vars.push_back(ndinputs[i].var());
     }
   }
-  common::DeduplicateVarHandle(&read_vars, &write_vars);
+  Engine::Get()->DeduplicateVarHandle(&read_vars, &write_vars);
 }
 
 void PushFCompute(const FCompute& fn,
@@ -236,8 +239,9 @@ void PushFCompute(const FCompute& fn,
                   const std::vector<Resource>& requested,
                   const std::vector<NDArray>& ndinputs,
                   const std::vector<NDArray>& ndoutputs) {
+  bool is_train = AutogradRuntime::Get()->IsTraining();
   Engine::Get()->PushAsync(
-    [ctx, attrs, fn, ndinputs, ndoutputs, requested](
+    [ctx, attrs, fn, ndinputs, ndoutputs, requested, is_train](
         RunContext rctx,
         engine::CallbackOnComplete on_complete) {
       std::vector<TBlob> input_blobs, output_blobs;
@@ -245,10 +249,9 @@ void PushFCompute(const FCompute& fn,
         input_blobs.push_back(i.data());
       }
       for (auto& i : ndoutputs) {
-        i.CheckAndAlloc();
         output_blobs.push_back(i.data());
       }
-      OpContext opctx{false, rctx,
+      OpContext opctx{is_train, rctx,
                       engine::CallbackOnComplete(),
                       requested};
       std::vector<OpReqType> req(output_blobs.size(), kWriteTo);
@@ -261,7 +264,8 @@ void PushFCompute(const FCompute& fn,
     0, PROFILER_MESSAGE(op->name.c_str()));
 }
 
-void PushOperator(const nnvm::Op* op,
+void PushOperator(std::shared_ptr<Operator> opr,
+                  const nnvm::Op* op,
                   const nnvm::NodeAttrs& attrs,
                   const Context& ctx,
                   const std::vector<engine::VarHandle>& read_vars,
@@ -270,16 +274,14 @@ void PushOperator(const nnvm::Op* op,
                   const std::vector<uint32_t>& auxidx,
                   const std::vector<NDArray>& ndinputs,
                   const std::vector<NDArray>& ndoutputs) {
-  static auto& createop = nnvm::Op::GetAttr<FCreateLayerOp>("FCreateLayerOp");
-  MXAPIThreadLocalEntry *ret = MXAPIThreadLocalStore::Get();
-  Operator* opr = createop[op](attrs, ctx, ret->arg_shapes, ret->arg_types);
   struct Capture {
     engine::CallbackOnComplete on_complete;
-    Operator *opr;
+    std::shared_ptr<Operator> opr;
   };
 
+  bool is_train = AutogradRuntime::Get()->IsTraining();
   Engine::Get()->PushAsync(
-    [ctx, opr, auxidx, ndinputs, ndoutputs, requested](
+    [ctx, opr, auxidx, ndinputs, ndoutputs, requested, is_train](
         RunContext rctx,
         engine::CallbackOnComplete on_complete) {
       std::vector<TBlob> input_blobs, aux_blobs, output_blobs;
@@ -293,16 +295,14 @@ void PushOperator(const nnvm::Op* op,
         }
       }
       for (auto& i : ndoutputs) {
-        i.CheckAndAlloc();
         output_blobs.push_back(i.data());
       }
       Capture* capture = new Capture({on_complete, opr});
-      OpContext opctx{false, rctx,
+      OpContext opctx{is_train, rctx,
                       Engine::Get()->CreateCallback(
                         [](Engine* engine, void *cpt_handle) {
                             Capture* cpt = static_cast<Capture*>(cpt_handle);
                             cpt->on_complete();
-                            delete cpt->opr;
                             delete cpt;
                           }, static_cast<void*>(capture)),
                       requested};
@@ -312,7 +312,6 @@ void PushOperator(const nnvm::Op* op,
         if (ctx.dev_mask() == gpu::kDevMask) {
           rctx.get_stream<gpu>()->Wait();
         }
-        delete opr;
         delete capture;
         on_complete();
       }
@@ -372,10 +371,20 @@ int MXImperativeInvoke(AtomicSymbolCreator creator,
     }
 
     if (fn) {
+      if (AutogradRuntime::Get()->IsTraining()) {
+        AutogradRuntime::Get()->RecordImperativeFCompute(fn, op,
+            attrs, &ndinputs, &ndoutputs);
+      }
       PushFCompute(fn, op, attrs, ctx, read_vars, write_vars,
           requested, ndinputs, ndoutputs);
     } else if (createop.count(op)) {
-      PushOperator(op, attrs, ctx, read_vars, write_vars,
+      std::shared_ptr<Operator> opr(
+          createop[op](attrs, ctx, ret->arg_shapes, ret->arg_types));
+      if (AutogradRuntime::Get()->IsTraining()) {
+        AutogradRuntime::Get()->RecordImperativeOperator(opr, op,
+            attrs, &ndinputs, &ndoutputs);
+      }
+      PushOperator(opr, op, attrs, ctx, read_vars, write_vars,
           requested, auxidx, ndinputs, ndoutputs);
     } else {
       LOG(FATAL)
@@ -384,6 +393,7 @@ int MXImperativeInvoke(AtomicSymbolCreator creator,
         << " FCompute<xpu>, NDArrayFunction, FCreateOperator be registered";
     }
   }
+
 
   if (outarray == nullptr) {
     ret->ret_handles.clear();
@@ -397,5 +407,46 @@ int MXImperativeInvoke(AtomicSymbolCreator creator,
       *outarray[i] = std::move(ndoutputs[i]);
     }
   }
+  API_END();
+}
+
+int MXAutogradSetIsTraining(int is_training, int* prev) {
+  API_BEGIN();
+  *prev = AutogradRuntime::Get()->SetIsTraining(static_cast<bool>(is_training));
+  API_END();
+}
+
+int MXAutogradMarkVariables(mx_uint num_var,
+                            NDArrayHandle *var_handles,
+                            mx_uint *reqs_array,
+                            NDArrayHandle *grad_handles) {
+  API_BEGIN();
+  std::vector<NDArray*> variables, gradients;
+  std::vector<mx_uint> grad_reqs;
+  variables.reserve(num_var);
+  gradients.reserve(num_var);
+  grad_reqs.reserve(num_var);
+  for (mx_uint i = 0; i < num_var; ++i) {
+    variables.emplace_back(static_cast<NDArray*>(var_handles[i]));
+    gradients.emplace_back(static_cast<NDArray*>(grad_handles[i]));
+    grad_reqs.emplace_back(reqs_array[i]);
+  }
+  AutogradRuntime::Get()->MarkVariables(variables, grad_reqs, gradients);
+  API_END();
+}
+
+int MXAutogradComputeGradient(mx_uint num_output,
+                              NDArrayHandle *output_handles) {
+  API_BEGIN();
+  MXAPIThreadLocalEntry *ret = MXAPIThreadLocalStore::Get();
+
+  std::vector<NDArray> outputs;
+  outputs.reserve(num_output);
+  for (mx_uint i = 0; i < num_output; ++i) {
+    outputs.emplace_back(*static_cast<NDArray*>(output_handles[i]));
+  }
+
+  AutogradRuntime::Get()->ComputeGradient(outputs);
+
   API_END();
 }
